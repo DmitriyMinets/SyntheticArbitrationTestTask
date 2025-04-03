@@ -1,0 +1,114 @@
+services:
+  api-gateway:
+    image: traefik:latest
+    container_name: traefik
+    restart: unless-stopped
+    ports:
+      - "${TRAEFIK_DASHBOARD_PORT}:8080"
+      - "${TRAEFIK_HTTP_PORT}:80"
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+    networks:
+      - app-network
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+
+  synthetic-arbitration-api:
+    container_name: synthetic-arbitration-api
+    image: synthetic-arbitration-api:latest
+    restart: unless-stopped
+    depends_on:
+      - api-gateway
+      - postgres
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.synthetic-arbitration-api.loadbalancer.server.port=5058
+      - traefik.http.routers.synthetic-arbitration-api.rule=PathPrefix(`/synthetic-arbitration-api`)
+    build:
+      context: ./SyntheticArbitration
+      dockerfile: ./Dockerfile
+    environment:
+      - ASPNETCORE_URLS=http://+:5058
+      - ConnectionStrings__DefaultConnection=Server=postgres;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};Port=${POSTGRES_CONTAINER_PORT};
+    ports:
+      - "5000:5058"
+    volumes:
+      - logs_data:/app/logs
+    networks:
+      - app-network
+
+  postgres:
+    image: postgres:latest
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_HOST_PORT}:${POSTGRES_CONTAINER_PORT}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    restart: unless-stopped
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.grafana.rule=PathPrefix(`/grafana`)
+      - traefik.http.services.grafana.loadbalancer.server.port=${GRAFANA_PORT}
+      - traefik.http.services.grafana.loadbalancer.server.scheme=http
+      - traefik.http.services.grafana.loadbalancer.server.url=http://grafana:${GRAFANA_PORT}
+    volumes:
+      - ./GrafanaData:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_SERVER_ROOT_URL=http://${BASE_URL}:${TRAEFIK_HTTP_PORT}/grafana
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+    networks:
+      - app-network
+    depends_on:
+      - loki
+  
+  promtail:
+    image: grafana/promtail:2.9.1
+    container_name: promtail
+    restart: unless-stopped
+    volumes:
+      - logs_data:/app/logs
+      - ./Configs/promtail-config.yaml:/etc/promtail/config.yaml
+    command: -config.file=/etc/promtail/config.yaml
+    ports:
+      - "9080:9080"
+    networks:
+      - app-network
+        
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./Configs/loki-config.yml:/etc/loki/loki-config.yml
+    command: -config.file=/etc/loki/loki-config.yml
+    networks:
+      - app-network
+
+volumes:
+  postgres_data:
+    name: postgres_data
+    driver: local
+  logs_data:
+    name: logs_data
+    driver: local
+    
+networks:
+  app-network:
+    name: app-network
+    driver: bridge
